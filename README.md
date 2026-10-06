@@ -79,3 +79,17 @@ about 30 seconds. Switch the service to a paid plan to keep it awake.
 
 AI spend is capped two ways: per visitor IP (`AI_LIMIT_PER_HOUR`) and site-wide per day
 (`AI_DAILY_LIMIT`). Also set a monthly spend limit in the Claude Console.
+
+## Deploy to Vercel
+
+Vercel runs `app.py` as a single function. It serves `public/` from its CDN, and
+`vercel.json` allows 60 seconds per request for cover-letter drafts.
+
+1. In Vercel, choose **Add New → Project** and import the GitHub repo. Leave the build
+   settings at their defaults.
+2. Under **Environment Variables**, add the four keys.
+3. Click **Deploy**.
+
+On Vercel, the job-search cache and the AI rate limits are kept in each running
+instance's memory, so they're best-effort there. Rely on a spend limit in the Claude
+Console as well.

@@ -25,7 +25,8 @@ AI_DAILY_LIMIT = int(os.environ.get("AI_DAILY_LIMIT", "500"))
 
 
 def create_app(feed: JobFeed | None = None) -> Flask:
-    app = Flask(__name__)
+    # Static files live in public/ so Vercel can serve them from its CDN; Flask serves them locally.
+    app = Flask(__name__, static_folder="public/static", static_url_path="/static")
     app.config["JSON_SORT_KEYS"] = False
     app.feed = feed or JobFeed(
         reed_key=os.environ.get("REED_API_KEY"),
