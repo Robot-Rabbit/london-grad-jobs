@@ -29,7 +29,8 @@ const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "
 async function load(refresh = false) {
   state.loading = true; state.error = ""; render();
   try {
-    const params = new URLSearchParams({ q: state.q });
+    // Every load asks for fresh listings; the Refresh link forces a full re-fetch.
+    const params = new URLSearchParams({ q: state.q, fresh: "1" });
     if (refresh) params.set("refresh", "1");
     const r = await fetch("/api/jobs?" + params);
     if (!r.ok) throw new Error();
@@ -65,6 +66,7 @@ function filtered() {
   const pkey = j => j.posted ? dayDiff(j.posted) : -9999;
   if (state.sort === "deadline") list.sort((a, b) => dkey(a) - dkey(b) || pkey(b) - pkey(a));
   if (state.sort === "newest") list.sort((a, b) => pkey(b) - pkey(a));
+  if (state.sort === "applicants") list.sort((a, b) => (a.applicants ?? Infinity) - (b.applicants ?? Infinity));
   if (state.sort === "salary") list.sort((a, b) => (b.salary_annual || 0) - (a.salary_annual || 0));
   return list;
 }
@@ -93,14 +95,32 @@ function dueChip(j) {
     const ago = j.posted ? -dayDiff(j.posted) : 999;
     return `<div class="due ok">${ago <= 14 ? "New" : "Open now"}<small>on employer site</small></div>`;
   }
-  if (j.posted) {
-    const ago = -dayDiff(j.posted);
-    return `<div class="due na">${ago <= 0 ? "Posted today" : ago === 1 ? "Posted yesterday" : `Posted ${ago}d ago`}<small>no closing date</small></div>`;
-  }
+  if (j.posted) return `<div class="due na">Open<small>no closing date</small></div>`;
   return `<div class="due na">Deadline<small>see listing</small></div>`;
 }
 
-const SRC_LABEL = { scheme: "Grad scheme", employer: "Employer careers", employers: "employer careers sites", reed: "Reed", adzuna: "Adzuna" };
+function postedText(j) {
+  if (!j.posted) return "";
+  const ago = -dayDiff(j.posted);
+  const when = fmtDate.format(new Date(j.posted));
+  const rel = ago <= 0 ? "today" : ago === 1 ? "yesterday" : ago <= 60 ? `${ago} days ago` : "";
+  // Jooble only reports when a listing was last updated, not when it first went up.
+  const verb = j.posted_kind === "updated" ? "Updated" : "First posted";
+  const title = j.posted_kind === "updated" ? "Jooble gives the last-updated date only" : "Date the role was first posted";
+  return `<span class="posted" title="${title}">${verb} ${when}${rel ? ` · ${rel}` : ""}</span>`;
+}
+
+function applicantsText(j) {
+  if (j.applicants == null) return "";
+  const n = j.applicants;
+  // Reed only counts applications made through Reed; some jobs send applicants to the
+  // employer's own site, so say where the number comes from.
+  const label = n === 0 ? "No Reed applicants yet" : `${n.toLocaleString("en-GB")} applied via Reed`;
+  // Few applicants is worth flagging: an early application gets more attention.
+  return `<span class="${n < 10 ? "apps low" : "apps"}" title="Applications made through Reed so far">${label}</span>`;
+}
+
+const SRC_LABEL = { scheme: "Grad scheme", employer: "Employer careers", employers: "employer careers sites", reed: "Reed", adzuna: "Adzuna", careerjet: "Careerjet", jooble: "Jooble" };
 
 function renderFeedline() {
   const d = state.data;
@@ -142,6 +162,8 @@ function render() {
           <span>${esc(j.sector)}</span>
           <span>${esc(j.area)}</span>
           <span>${j.salary_label ? `<b>${esc(j.salary_label)}</b>` : "Salary not listed"}</span>
+          ${postedText(j)}
+          ${applicantsText(j)}
         </div>
       </div>
       ${dueChip(j)}
@@ -322,6 +344,34 @@ async function copy(text, btn) {
 }
 $("copyHi").onclick = e => copy(lastHi, e.currentTarget);
 $("copyCl").onclick = e => copy(lastCl, e.currentTarget);
+
+// ---------- email alerts (the panel only exists when the server can send them) ----------
+if ($("alertForm")) {
+const alertDesc = () => {
+  const parts = [];
+  if (state.q) parts.push(`“${state.q}”`);
+  if (state.sector !== "All") parts.push(state.sector);
+  return parts.length ? parts.join(" in ") : "all graduate roles";
+};
+const syncAlertWhat = () => { $("alertWhat").textContent = alertDesc(); };
+$("chips").addEventListener("click", syncAlertWhat);
+$("qform").addEventListener("submit", syncAlertWhat);
+const savedEmail = store.get("alertEmail", "");
+if (savedEmail) $("alertEmail").value = savedEmail;
+
+$("alertForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  const btn = $("alertBtn"), msg = $("alertMsg");
+  btn.disabled = true; msg.className = "note"; msg.textContent = "Setting up…";
+  try {
+    const r = await postJSON("/api/alerts", { email: $("alertEmail").value, keywords: state.q, sector: state.sector });
+    store.set("alertEmail", $("alertEmail").value);
+    msg.textContent = r.message;
+  } catch (err) {
+    msg.className = "err"; msg.textContent = err.message;
+  } finally { btn.disabled = false; }
+});
+}
 
 load();
 })();

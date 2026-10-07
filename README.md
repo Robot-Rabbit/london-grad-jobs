@@ -7,7 +7,8 @@ A search site for London graduate jobs and 2027-intake graduate schemes. It has:
   [Adzuna](https://developer.adzuna.com), merges them, removes duplicates and expired
   listings, and caches each search for 15 minutes.
 - **Employer careers sites.** Reads the public job-board APIs that employers publish
-  through Greenhouse, Lever and Ashby. It keeps London roles whose titles look
+  through Greenhouse, Lever, Ashby, SmartRecruiters and Workable, plus Workday careers
+  sites (Citi, LSEG, Barclays, Morgan Stanley and others). It keeps London roles whose titles look
   graduate-level, such as "Graduate", "New Grad", "Junior" or "2027". The employer list is
   `EMPLOYERS` in `employers.py`. This feed needs no keys, and results are cached for 30 minutes.
 - **Graduate scheme snapshot.** A hand-checked list of big-employer schemes (J.P. Morgan,
@@ -32,6 +33,8 @@ Then fill in `.env`:
 |---|---|---|
 | `REED_API_KEY` | Live Reed listings | https://www.reed.co.uk/developers/jobseeker |
 | `ADZUNA_APP_ID`, `ADZUNA_APP_KEY` | Live Adzuna listings | https://developer.adzuna.com |
+| `CAREERJET_API_KEY` | Live Careerjet listings | https://www.careerjet.com/partners/ |
+| `JOOBLE_API_KEY` | Live Jooble listings | https://jooble.org/api/about |
 | `ANTHROPIC_API_KEY` | AI features | https://platform.claude.com/settings/keys |
 
 Every key is optional:
@@ -93,3 +96,29 @@ Vercel runs `app.py` as a single function. It serves `public/` from its CDN, and
 On Vercel, the job-search cache and the AI rate limits are kept in each running
 instance's memory, so they're best-effort there. Rely on a spend limit in the Claude
 Console as well.
+
+## Email alerts
+
+Visitors can save their current search and sector as a daily email alert.
+
+1. They get a confirmation email, and nothing is sent until they press **Confirm** on the
+   page it links to (double opt-in).
+2. Once confirmed, a Vercel Cron job (`/api/cron/alerts`, daily at 06:00 UTC) emails any
+   new matching roles.
+3. Every email has an unsubscribe link and a one-click `List-Unsubscribe` header.
+   Unconfirmed alerts expire after 7 days.
+
+Setup, all in Vercel → Project → Settings:
+
+- **Storage:** add **Upstash for Redis** from the Marketplace (Storage tab). It sets
+  `UPSTASH_REDIS_REST_URL`/`TOKEN` (or `KV_REST_API_URL`/`TOKEN`) automatically.
+- **SendGrid:** create an API key with Mail Send permission, and verify a sender under
+  Settings → Sender Authentication. Single Sender works without a domain, but
+  authenticating a domain gets much better inbox placement. Set `SENDGRID_API_KEY` and
+  `ALERTS_FROM_EMAIL`.
+- **`CRON_SECRET`:** any random string of 16+ characters. Vercel sends it to the cron job.
+- **`PUBLIC_BASE_URL`:** optional, e.g. `https://london-grad-jobs.vercel.app`, used for
+  links in emails.
+
+Without Upstash, alerts are kept in memory (local testing only). Without SendGrid,
+emails are written to the log instead of being sent.

@@ -13,7 +13,7 @@ REED_PAYLOAD = {
             "locationName": "London", "minimumSalary": 30000.0, "maximumSalary": 34000.0,
             "expirationDate": "30/12/2099", "date": "01/10/2026",
             "jobDescription": "<p>Join our <b>data</b> team &amp; learn SQL.</p>",
-            "jobUrl": "https://www.reed.co.uk/jobs/111",
+            "jobUrl": "https://www.reed.co.uk/jobs/111", "applications": 7,
         },
         {
             "jobId": 112, "employerName": "Old Co", "jobTitle": "Graduate Sales Executive",
@@ -83,6 +83,7 @@ def test_live_feed_merges_normalises_and_dedupes(client):
     assert reed["salary_label"] == "£30,000–£34,000"
     assert reed["deadline"] == "2099-12-30"
     assert reed["sector"] == "Data & AI"
+    assert reed["posted"] == "2026-10-01" and reed["applicants"] == 7
 
     assert "reed:112" not in by_id  # expired
     assert "adzuna:10" not in by_id  # duplicate of reed:111
@@ -199,3 +200,20 @@ def test_ai_limits(monkeypatch):
     assert post("8.8.8.8") == 404   # third call site-wide
     assert post("7.7.7.7") == 429   # daily cap reached
     assert c.get("/healthz").get_json() == {"ok": True}
+
+
+def test_page_load_gets_fresh_data_but_not_more_than_once_a_minute():
+    import app as app_module
+    calls = []
+    feed = JobFeed(reed_key="k")
+    with patch.object(feeds, "fetch_reed", side_effect=lambda *a: calls.append(1) or []):
+        c = create_app(feed).test_client()
+        r = c.get("/api/jobs?fresh=1")
+        assert r.headers["Cache-Control"] == "no-store"
+        c.get("/api/jobs?fresh=1")
+        assert len(calls) == 1          # within a minute: served from memory
+        feed._cache[""] = (feed._cache[""][0] - app_module.FRESH_MAX_AGE - 1, feed._cache[""][1])
+        c.get("/api/jobs?fresh=1")
+        assert len(calls) == 2          # older than a minute: fetched again
+        c.get("/api/jobs?refresh=1")
+        assert len(calls) == 3          # Refresh always fetches

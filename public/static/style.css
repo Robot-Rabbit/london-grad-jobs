@@ -144,3 +144,5 @@ footer { margin-top: 36px; font-size: 12.5px; color: var(--muted); max-width: 80
 @media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
 .gaps { margin-top: 12px; font-size: 13px; }
 .gaps li { color: var(--warn); }
+.job .meta .apps { font-variant-numeric: tabular-nums; }
+.job .meta .apps.low { color: var(--accent); font-weight: 500; }

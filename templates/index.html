@@ -34,6 +34,8 @@
         <option value="employer">Employer careers sites (live)</option>
         <option value="reed">Reed (live)</option>
         <option value="adzuna">Adzuna (live)</option>
+        <option value="careerjet">Careerjet (live)</option>
+        <option value="jooble">Jooble (live)</option>
       </select>
       <select id="window" aria-label="Closing window">
         <option value="any">Any deadline</option>
@@ -45,6 +47,7 @@
         <option value="deadline">Sort: closing soonest</option>
         <option value="newest">Sort: newest first</option>
         <option value="salary">Sort: highest salary</option>
+        <option value="applicants">Sort: fewest applicants</option>
       </select>
       <label class="chk"><input type="checkbox" id="salOnly"> Salary listed</label>
       <label class="chk"><input type="checkbox" id="savedOnly"> Shortlist only</label>
@@ -73,6 +76,19 @@
           <span class="note" id="profSaved"></span>
         </div>
       </section>
+
+      {% if alerts_email %}
+      <section class="panel" aria-labelledby="alertH">
+        <h2 id="alertH">Email me new roles</h2>
+        <p class="sub">Get one email each morning when new roles match <b id="alertWhat">all graduate roles</b>. Change the search or sector above to narrow it.</p>
+        <form id="alertForm" class="row" style="margin-top:0">
+          <input id="alertEmail" type="email" required autocomplete="email" placeholder="you@example.com" aria-label="Email address" style="flex:1 1 180px;min-width:0;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg)">
+          <button class="btn primary small" type="submit" id="alertBtn">Create alert</button>
+        </form>
+        <p class="note" id="alertMsg" aria-live="polite"></p>
+        <p class="note">We'll email a confirmation link first. We store only your email and this search, and every email has an unsubscribe link.</p>
+      </section>
+      {% endif %}
 
       <section class="panel" aria-labelledby="aiH" id="aiPanel">
         <h2 id="aiH">Application helper <span class="ai-tag">AI</span></h2>
@@ -113,11 +129,11 @@
   </div>
 
   <footer>
-    Live listings come from the Reed and Adzuna job APIs and from employers' own careers sites (Greenhouse, Lever and Ashby job boards), filtered to graduate roles in and around London. Graduate schemes are a hand-checked snapshot from {{ snapshot_date }}. Deadlines move and schemes close early once they fill, so always confirm on the employer's page before applying.
+    Live listings come from the Reed, Adzuna, Careerjet and Jooble job APIs and from employers' own careers sites, filtered to graduate roles in and around London. Graduate schemes are a hand-checked snapshot from {{ snapshot_date }}. Deadlines move and schemes close early once they fill, so always confirm on the employer's page before applying.
   </footer>
 </div>
 <script>
-  window.APP = {{ {"liveSources": live_sources, "aiEnabled": ai_enabled, "snapshotDate": snapshot_date} | tojson }};
+  window.APP = {{ {"liveSources": live_sources, "aiEnabled": ai_enabled, "alertsEmail": alerts_email, "snapshotDate": snapshot_date} | tojson }};
 </script>
 <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>

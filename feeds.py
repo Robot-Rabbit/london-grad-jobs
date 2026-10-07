@@ -3,6 +3,7 @@
 Every job is normalised to one dict shape (see curated.curated_jobs) plus a `sector`.
 """
 
+import hashlib
 import html
 import logging
 import re
@@ -10,6 +11,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
+from email.utils import parsedate_to_datetime
 
 import requests
 
@@ -20,6 +22,8 @@ log = logging.getLogger(__name__)
 REED_SEARCH = "https://www.reed.co.uk/api/1.0/search"
 REED_DETAIL = "https://www.reed.co.uk/api/1.0/jobs/{id}"
 ADZUNA_SEARCH = "https://api.adzuna.com/v1/api/jobs/gb/search/{page}"
+JOOBLE_SEARCH = "https://jooble.org/api/{key}"
+CAREERJET_SEARCH = "https://search.api.careerjet.net/v4/query"
 TIMEOUT = 10
 CACHE_TTL = 15 * 60
 
@@ -70,15 +74,19 @@ def _period(value) -> str:
     return "year"
 
 
-ANNUALISE = {"hour": 37.5 * 52, "day": 230, "year": 1}
+ANNUALISE = {"hour": 37.5 * 52, "day": 230, "week": 52, "month": 12, "year": 1}
 
 
-def salary_info(lo, hi) -> tuple[str, float | None]:
-    """Returns (display label, annual equivalent for sorting)."""
+def salary_info(lo, hi, period: str | None = None) -> tuple[str, float | None]:
+    """Returns (display label, annual equivalent for sorting).
+
+    `period` ("year", "month", "week", "day", "hour") when the source states it;
+    otherwise it is guessed from the size of the number."""
     lo, hi = lo or hi, hi or lo
     if not lo:
         return "", None
-    period = _period(hi)
+    lo, hi = float(lo), float(hi)
+    period = period or _period(hi)
     money = (lambda v: f"£{v:,.2f}".replace(".00", "")) if period == "hour" else (lambda v: f"£{int(v):,}")
     label = money(lo) if int(hi * 100) == int(lo * 100) else f"{money(lo)}–{money(hi)}"
     if period != "year":
@@ -133,7 +141,7 @@ def fetch_reed(api_key: str, q: str) -> list[dict]:
     total = min(int(first.get("totalResults") or 0), REED_MAX)
     skips = range(REED_PAGE, total, REED_PAGE)
     if skips:
-        with ThreadPoolExecutor(max_workers=3) as pool:
+        with ThreadPoolExecutor(max_workers=5) as pool:
             for page in pool.map(lambda sk: _reed_page(api_key, q, sk), skips):
                 results.extend(page.get("results", []))
     out = []
@@ -153,6 +161,7 @@ def fetch_reed(api_key: str, q: str) -> list[dict]:
             "salary_annual": salary_info(lo, hi)[1],
             "deadline": _uk_date(j.get("expirationDate")),
             "posted": _uk_date(j.get("date")),
+            "applicants": j.get("applications"),
             "description": desc,
             "url": j.get("jobUrl") or f"https://www.reed.co.uk/jobs/{j.get('jobId')}",
             "sector": classify(title, desc[:300]),
@@ -212,6 +221,119 @@ def fetch_adzuna(app_id: str, app_key: str, q: str, pages: int = 5) -> list[dict
     return out
 
 
+# ---------------------------------------------------------------- Jooble
+def parse_salary_text(text: str) -> tuple[float | None, float | None]:
+    """'£28k - £32k', '28000 - 32000 GBP', '£12.50 per hour' -> (low, high)."""
+    nums = []
+    for m in re.finditer(r"(\d[\d,]*(?:\.\d+)?)\s*(k\b)?", (text or "").lower()):
+        v = float(m.group(1).replace(",", ""))
+        nums.append(v * 1000 if m.group(2) else v)
+    nums = [n for n in nums if n >= 5]  # drop stray small numbers
+    if not nums:
+        return None, None
+    return min(nums), max(nums)
+
+
+def _any_date(value) -> str | None:
+    """ISO ('2026-10-05T00:00:00.0000000') or RFC 2822 ('Mon, 05 Oct 2026 ...') -> YYYY-MM-DD."""
+    if not value:
+        return None
+    value = str(value).strip()
+    if re.match(r"^\d{4}-\d{2}-\d{2}", value):
+        return value[:10]
+    try:
+        return parsedate_to_datetime(value).date().isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
+def fetch_jooble(api_key: str, q: str, pages: int = 3) -> list[dict]:
+    out = []
+    for page in range(1, pages + 1):
+        body = {"keywords": f"graduate {q}".strip(), "location": "London", "radius": "25",
+                "page": str(page), "ResultOnPage": "50"}
+        r = requests.post(JOOBLE_SEARCH.format(key=api_key), json=body, timeout=TIMEOUT)
+        r.raise_for_status()
+        jobs = r.json().get("jobs", [])
+        for j in jobs:
+            title = clean_text(j.get("title", ""))
+            desc = clean_text(j.get("snippet", ""))
+            lo, hi = parse_salary_text(j.get("salary", ""))
+            label, annual = salary_info(lo, hi)
+            out.append({
+                "id": f"jooble:{j.get('id')}",
+                "source": "jooble",
+                "employer": clean_text(j.get("company", "")) or "Employer not named",
+                "title": title,
+                "area": clean_text(j.get("location", "")) or "London",
+                "salary_min": lo, "salary_max": hi,
+                "salary_label": label, "salary_annual": annual,
+                "deadline": None,
+                # Jooble only gives the last-updated date, not the first-posted one.
+                "posted": _any_date(j.get("updated")),
+                "posted_kind": "updated",
+                "applicants": None,
+                "description": desc,
+                "url": j.get("link"),
+                "sector": classify(title, desc[:300]),
+            })
+        if len(jobs) < 50:
+            break
+    return out
+
+
+# ---------------------------------------------------------------- Careerjet
+CAREERJET_PERIOD = {"Y": "year", "M": "month", "W": "week", "D": "day", "H": "hour"}
+
+
+def fetch_careerjet(api_key: str, q: str, user_ip: str, user_agent: str, pages: int = 3) -> list[dict]:
+    out = []
+    for page in range(1, pages + 1):
+        params = {
+            "locale_code": "en_GB",
+            "keywords": f"graduate {q}".strip(),
+            "location": "London",
+            "radius": 25,
+            "page": page,
+            "page_size": 100,
+            "sort": "date",
+            # Careerjet asks for the IP and browser of the person searching.
+            "user_ip": user_ip or "127.0.0.1",
+            "user_agent": user_agent or "london-grad-jobs",
+        }
+        r = requests.get(CAREERJET_SEARCH, params=params, auth=(api_key, ""), timeout=TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
+        jobs = data.get("jobs", []) if data.get("type", "JOBS") == "JOBS" else []
+        for j in jobs:
+            title = clean_text(j.get("title", ""))
+            desc = clean_text(j.get("description", ""))
+            label, annual = salary_info(j.get("salary_min"), j.get("salary_max"),
+                                        CAREERJET_PERIOD.get(j.get("salary_type")))
+            if not label and j.get("salary"):
+                label = clean_text(j["salary"])
+            url = j.get("url") or ""
+            out.append({
+                # Stable across processes, unlike hash(): ids must match between server instances.
+                "id": "careerjet:" + hashlib.sha1(url.encode()).hexdigest()[:12],
+                "source": "careerjet",
+                "employer": clean_text(j.get("company", "")) or "Employer not named",
+                "title": title,
+                "area": clean_text(j.get("locations", "")) or "London",
+                "salary_min": j.get("salary_min"), "salary_max": j.get("salary_max"),
+                "salary_label": label, "salary_annual": annual,
+                "deadline": None,
+                "posted": _any_date(j.get("date")),
+                "applicants": None,
+                "description": desc,
+                "url": url,
+                "sector": classify(title, desc[:300]),
+            })
+        if page >= int(data.get("pages") or 1):
+            break
+    return out
+
+
 # ---------------------------------------------------------------- merge
 def _key(job):
     norm = lambda s: re.sub(r"[^a-z0-9]", "", (s or "").lower())
@@ -225,9 +347,12 @@ def _matches(job, q: str) -> bool:
 
 
 class JobFeed:
-    def __init__(self, reed_key=None, adzuna_id=None, adzuna_key=None, boards=None):
+    def __init__(self, reed_key=None, adzuna_id=None, adzuna_key=None, boards=None,
+                 jooble_key=None, careerjet_key=None):
         """`boards` is an employers.EmployerBoards; None leaves employer boards out."""
         self.boards = boards
+        self.jooble_key = jooble_key
+        self.careerjet_key = careerjet_key
         self.reed_key = reed_key
         self.adzuna_id = adzuna_id
         self.adzuna_key = adzuna_key
@@ -242,23 +367,33 @@ class JobFeed:
             s.append("reed")
         if self.adzuna_id and self.adzuna_key:
             s.append("adzuna")
+        if self.careerjet_key:
+            s.append("careerjet")
+        if self.jooble_key:
+            s.append("jooble")
         return s
 
-    def search(self, q: str = "", force: bool = False) -> dict:
+    def search(self, q: str = "", force: bool = False, user_ip: str = "", user_agent: str = "",
+               max_age: float = CACHE_TTL) -> dict:
+        """`max_age` (seconds) is how old a cached result may be before we fetch again."""
         q = (q or "").strip()[:100]
         ck = q.lower()
         with self._lock:
             hit = self._cache.get(ck)
-        if hit and not force and time.time() - hit[0] < CACHE_TTL:
+        if hit and not force and time.time() - hit[0] < max_age:
             return hit[1]
 
         tasks, errors = {}, []
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            boards_fut = pool.submit(self.boards.jobs, force) if self.boards else None
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            boards_fut = pool.submit(self.boards.jobs, force, max_age) if self.boards else None
             if self.reed_key:
                 tasks["Reed"] = pool.submit(fetch_reed, self.reed_key, q)
             if self.adzuna_id and self.adzuna_key:
                 tasks["Adzuna"] = pool.submit(fetch_adzuna, self.adzuna_id, self.adzuna_key, q)
+            if self.careerjet_key:
+                tasks["Careerjet"] = pool.submit(fetch_careerjet, self.careerjet_key, q, user_ip, user_agent)
+            if self.jooble_key:
+                tasks["Jooble"] = pool.submit(fetch_jooble, self.jooble_key, q)
             live = []
             for name, fut in tasks.items():
                 try:

@@ -17,6 +17,10 @@ services:
         sync: false
       - key: ANTHROPIC_API_KEY
         sync: false
+      - key: CAREERJET_API_KEY
+        sync: false
+      - key: JOOBLE_API_KEY
+        sync: false
       - key: AI_LIMIT_PER_HOUR
         value: "40"
       - key: AI_DAILY_LIMIT
