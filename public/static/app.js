@@ -20,7 +20,7 @@ const fmtDate = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short
 const fmtTime = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit" });
 
 // ---------- state ----------
-const state = { q: "", data: null, loading: false, sector: "All", source: "all", win: "any", sort: "deadline",
+const state = { q: "", data: null, loading: false, sector: "All", source: "all", win: "any", sort: "newest", newIds: new Set(),
   salOnly: false, savedOnly: false, shown: PAGE, ai: null, target: null, error: "" };
 
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -38,9 +38,38 @@ async function load(refresh = false) {
   } catch {
     state.error = "Couldn't load jobs. Check the server is running, then refresh.";
   }
-  state.loading = false; state.shown = PAGE;
+  state.loading = false; state.shown = PAGE; state.newIds = new Set();
+  nextRefreshAt = Date.now() + REFRESH_EVERY;
   renderChips(); render();
 }
+
+// ---------- hourly background refresh ----------
+// While the page is open, fetch the latest listings every hour without disturbing the
+// reader: filters, scroll position and "show more" stay put, and new roles get a badge.
+const REFRESH_EVERY = 60 * 60 * 1000;
+let nextRefreshAt = Date.now() + REFRESH_EVERY;
+
+async function refreshInBackground() {
+  if (state.loading || state.ai) { nextRefreshAt = Date.now() + REFRESH_EVERY; return; }
+  try {
+    const r = await fetch("/api/jobs?" + new URLSearchParams({ q: state.q, fresh: "1" }));
+    if (!r.ok) throw new Error();
+    const data = await r.json();
+    const before = new Set((state.data?.jobs ?? []).map(j => j.id));
+    data.jobs.filter(j => !before.has(j.id)).forEach(j => state.newIds.add(j.id));
+    state.data = data;
+    renderChips(); render();
+  } catch { /* keep showing what we have; try again next hour */ }
+  nextRefreshAt = Date.now() + REFRESH_EVERY;
+}
+
+setInterval(() => {
+  // A hidden tab waits until it's looked at again, so we don't fetch for nobody.
+  if (Date.now() >= nextRefreshAt && !document.hidden) refreshInBackground();
+}, 60 * 1000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && Date.now() >= nextRefreshAt) refreshInBackground();
+});
 
 function allJobs() {
   const jobs = state.data?.jobs ?? [];
@@ -65,7 +94,7 @@ function filtered() {
   const dkey = j => j.deadline ? dayDiff(j.deadline) : 9999;
   const pkey = j => j.posted ? dayDiff(j.posted) : -9999;
   if (state.sort === "deadline") list.sort((a, b) => dkey(a) - dkey(b) || pkey(b) - pkey(a));
-  if (state.sort === "newest") list.sort((a, b) => pkey(b) - pkey(a));
+  if (state.sort === "newest") list.sort((a, b) => pkey(b) - pkey(a) || dkey(a) - dkey(b));
   if (state.sort === "applicants") list.sort((a, b) => (a.applicants ?? Infinity) - (b.applicants ?? Infinity));
   if (state.sort === "salary") list.sort((a, b) => (b.salary_annual || 0) - (a.salary_annual || 0));
   return list;
@@ -130,7 +159,8 @@ function renderFeedline() {
   } else {
     bits.push(`<span class="off">Live feed off: add REED_API_KEY or Adzuna keys to .env. Showing the scheme snapshot only.</span>`);
   }
-  if (d?.fetched_at) bits.push(`<span>Updated ${fmtTime.format(new Date(d.fetched_at))}</span>`);
+  if (d?.fetched_at) bits.push(`<span>Updated ${fmtTime.format(new Date(d.fetched_at))} · next update ${fmtTime.format(new Date(nextRefreshAt))}</span>`);
+  if (state.newIds.size) bits.push(`<span class="live">${state.newIds.size} new since you opened the page</span>`);
   (d?.errors || []).forEach(e => bits.push(`<span class="off">${esc(e)}</span>`));
   bits.push(`<button class="linkbtn" id="refresh" type="button">Refresh</button>`);
   $("feedline").innerHTML = bits.join("");
@@ -155,7 +185,7 @@ function render() {
   $("jobs").innerHTML = page.length ? page.map(j => `
     <article class="job${state.target === j.id ? " selected" : ""}" data-id="${esc(j.id)}">
       <div style="min-width:0">
-        <div class="emp">${esc(j.employer)}</div>
+        <div class="emp">${state.newIds.has(j.id) ? '<span class="newbadge">New</span>' : ""}${esc(j.employer)}</div>
         <h3>${esc(j.title)}</h3>
         <div class="meta">
           <span class="src ${j.source}">${SRC_LABEL[j.source] || esc(j.source)}</span>
