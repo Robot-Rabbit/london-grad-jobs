@@ -147,3 +147,7 @@ footer { margin-top: 36px; font-size: 12.5px; color: var(--muted); max-width: 80
 .job .meta .apps { font-variant-numeric: tabular-nums; }
 .job .meta .apps.low { color: var(--accent); font-weight: 500; }
 .newbadge { display: inline-block; margin-right: 6px; padding: 2px 6px; border-radius: 5px; background: var(--accent); color: var(--accent-ink); font: 500 10px/1.2 var(--f-mono); letter-spacing: .06em; text-transform: uppercase; vertical-align: 1px; }
+/* Applied roles: stay visible but step back, so unapplied roles stand out */
+.job.applied { background: var(--bg); }
+.job.applied h3, .job.applied .meta, .job.applied .desc { opacity: .62; }
+.applied-btn { background: var(--accent-soft); border-color: transparent; color: var(--accent); font-weight: 600; }

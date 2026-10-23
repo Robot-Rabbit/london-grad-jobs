@@ -12,6 +12,11 @@ const store = {
 // Shortlist keeps whole job objects: live listings come and go between searches.
 let saved = new Map(store.get("shortlist", []).map(j => [j.id, j]));
 const saveShortlist = () => store.set("shortlist", [...saved.values()]);
+// Applied roles: id -> { job, on: "YYYY-MM-DD" }. Whole job objects are kept so the
+// list still works after a listing drops out of the live feed.
+let applied = new Map(store.get("applied", []).map(a => [a.job.id, a]));
+const saveApplied = () => store.set("applied", [...applied.values()]);
+const isoToday = () => { const d = new Date(); return new Date(d - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); };
 
 // ---------- dates ----------
 const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -21,7 +26,7 @@ const fmtTime = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-d
 
 // ---------- state ----------
 const state = { q: "", data: null, loading: false, sector: "All", source: "all", win: "any", sort: "newest", newIds: new Set(),
-  salOnly: false, savedOnly: false, shown: PAGE, ai: null, target: null, error: "" };
+  salOnly: false, savedOnly: false, appliedView: "all", shown: PAGE, ai: null, target: null, error: "" };
 
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
@@ -72,13 +77,16 @@ document.addEventListener("visibilitychange", () => {
 });
 
 function allJobs() {
-  const jobs = state.data?.jobs ?? [];
-  if (!state.savedOnly) return jobs;
-  return [...saved.values()];
+  if (state.appliedView === "only") {
+    return [...applied.values()].sort((a, b) => b.on.localeCompare(a.on)).map(a => a.job);
+  }
+  if (state.savedOnly) return [...saved.values()];
+  return state.data?.jobs ?? [];
 }
 
 function filtered() {
   let list = allJobs().filter(j => {
+    if (state.appliedView === "hide" && applied.has(j.id)) return false;
     if (state.sector !== "All" && j.sector !== state.sector) return false;
     if (state.source !== "all" && j.source !== state.source) return false;
     if (state.salOnly && !j.salary_min) return false;
@@ -149,6 +157,20 @@ function applicantsText(j) {
   return `<span class="${n < 10 ? "apps low" : "apps"}" title="Applications made through Reed so far">${label}</span>`;
 }
 
+function appliedButton(j) {
+  const a = applied.get(j.id);
+  if (!a) return `<button class="btn small" data-act="applied" aria-pressed="false">Mark as applied</button>`;
+  const on = fmtDate.format(new Date(a.on));
+  return `<button class="btn small applied-btn" data-act="applied" aria-pressed="true" title="Click to undo">✓ Applied ${on}</button>`;
+}
+
+function emptyMessage() {
+  if (state.appliedView === "only") return "You haven't marked any roles as applied yet. Use “Mark as applied” on a role after you apply.";
+  if (state.savedOnly) return "Your shortlist is empty. Use ☆ Shortlist on any role to keep it here.";
+  if (state.appliedView === "hide" && applied.size) return "No roles left to show. You've applied to everything that matches, or try clearing some filters.";
+  return "No roles match. Try a broader search or clear some filters.";
+}
+
 const SRC_LABEL = { scheme: "Grad scheme", employer: "Employer careers", employers: "employer careers sites", reed: "Reed", adzuna: "Adzuna", careerjet: "Careerjet", jooble: "Jooble" };
 
 function renderFeedline() {
@@ -178,12 +200,14 @@ function render() {
   }
   if (state.error) { $("jobs").innerHTML = `<div class="empty">${esc(state.error)}</div>`; return; }
   const list = filtered();
-  $("count").textContent = `${list.length} ${list.length === 1 ? "role" : "roles"}`;
-  $("listTitle").textContent = state.ai ? "Smart match results" : state.savedOnly ? "Your shortlist" : "Graduate roles in London";
+  $("count").textContent = `${list.length} ${list.length === 1 ? "role" : "roles"}` +
+    (applied.size && state.appliedView !== "only" ? ` · ${applied.size} applied` : "");
+  $("listTitle").textContent = state.ai ? "Smart match results" : state.appliedView === "only" ? "Roles you've applied to"
+    : state.savedOnly ? "Your shortlist" : "Graduate roles in London";
   const why = state.ai ? Object.fromEntries(state.ai.matches.map(m => [m.id, m.why])) : {};
   const page = list.slice(0, state.shown);
   $("jobs").innerHTML = page.length ? page.map(j => `
-    <article class="job${state.target === j.id ? " selected" : ""}" data-id="${esc(j.id)}">
+    <article class="job${state.target === j.id ? " selected" : ""}${applied.has(j.id) ? " applied" : ""}" data-id="${esc(j.id)}">
       <div style="min-width:0">
         <div class="emp">${state.newIds.has(j.id) ? '<span class="newbadge">New</span>' : ""}${esc(j.employer)}</div>
         <h3>${esc(j.title)}</h3>
@@ -202,10 +226,11 @@ function render() {
       <div class="actions">
         <button class="btn small primary" data-act="tailor">Tailor application<span class="ai-tag">AI</span></button>
         <button class="btn small" data-act="save" aria-pressed="${saved.has(j.id)}">${saved.has(j.id) ? "★ Shortlisted" : "☆ Shortlist"}</button>
+        ${appliedButton(j)}
         <a class="btn small" href="${esc(j.url)}" target="_blank" rel="noopener">View &amp; apply ↗</a>
       </div>
     </article>`).join("")
-    : `<div class="empty">${state.savedOnly ? "Your shortlist is empty. Use ☆ Shortlist on any role to keep it here." : "No roles match. Try a broader search or clear some filters."}</div>`;
+    : `<div class="empty">${emptyMessage()}</div>`;
   $("moreBtn").hidden = list.length <= state.shown;
   $("moreBtn").textContent = `Show more (${list.length - state.shown} left)`;
 }
@@ -222,19 +247,24 @@ $("jobs").addEventListener("click", e => {
   if (b.dataset.act === "save") {
     saved.has(id) ? saved.delete(id) : saved.set(id, job);
     saveShortlist(); if (state.savedOnly) renderChips(); render();
+  } else if (b.dataset.act === "applied") {
+    // Clicking again undoes it, in case of a mis-tap.
+    applied.has(id) ? applied.delete(id) : applied.set(id, { job, on: isoToday() });
+    saveApplied(); renderChips(); render();
   } else setTarget(job);
 });
 $("moreBtn").onclick = () => { state.shown += PAGE; render(); };
 $("qform").addEventListener("submit", e => {
   e.preventDefault(); clearAi();
   state.q = $("q").value.trim(); state.savedOnly = false; $("savedOnly").checked = false;
+  if (state.appliedView === "only") { state.appliedView = "all"; $("appliedView").value = "all"; }
   load();
 });
 const bind = (id, key, ev = "change", prop = "value") => $(id).addEventListener(ev, e => {
   state[key] = e.target[prop]; state.shown = PAGE; if (key === "sort") clearAi(); if (key === "savedOnly") renderChips(); render();
 });
 bind("source", "source"); bind("window", "win"); bind("sort", "sort");
-bind("salOnly", "salOnly", "change", "checked"); bind("savedOnly", "savedOnly", "change", "checked");
+bind("salOnly", "salOnly", "change", "checked"); bind("appliedView", "appliedView"); bind("savedOnly", "savedOnly", "change", "checked");
 
 // ---------- profile ----------
 const EXAMPLE_PROFILE = `BSc Economics, University of Leeds (expected 2:1, graduating July 2027)
@@ -288,6 +318,7 @@ $("aiSearch").onclick = async () => {
     if (state.q) { state.q = ""; await load(); }
     if (!matches.length) { banner.textContent = "No strong matches. Try describing the kind of work you want."; return; }
     state.ai = { matches }; state.savedOnly = false; $("savedOnly").checked = false;
+    if (state.appliedView === "only") { state.appliedView = "all"; $("appliedView").value = "all"; }
     banner.innerHTML = `<span>Ranked by Claude for: <b>${esc(want || "your profile")}</b></span><button class="btn small" id="clearAi" type="button">Show all roles</button>`;
     $("clearAi").onclick = () => { clearAi(); render(); };
     render();

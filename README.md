@@ -60,7 +60,7 @@ venv/bin/pytest -q
 
 - **AI model.** AI calls use `claude-opus-5-5` with server-side refusal fallback turned
   on. They're rate-limited per visitor IP (`AI_LIMIT_PER_HOUR`, default 40).
-- **Profile storage.** A user's CV text and shortlist are stored only in their browser.
+- **Profile storage.** A user's CV text, shortlist and applied roles are stored only in their browser.
   The CV is sent to the server, and on to Claude, only when they press an AI button.
 - **Updating the snapshot.** Edit `curated.py` as schemes open and close. Expired
   deadlines are hidden automatically.
