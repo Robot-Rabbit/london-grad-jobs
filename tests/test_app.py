@@ -273,3 +273,23 @@ def test_course_adverts_are_not_jobs():
     assert is_course_ad("Trainee UX/UI Designer | No experience needed (Ref: 7902)", "UX/UI DESIGN TRAINEESHIP (REMOTE) Become a UX/UI Designer")
     assert is_course_ad("Trainee Data Analyst", "A small course fee applies")
     assert not is_course_ad("Trainee Accountant", "Join our audit team; we pay for your ACA exams.")
+
+
+def test_adzuna_rate_limit_keeps_good_pages_and_caches():
+    calls = []
+
+    def get(url, params=None, auth=None, timeout=None):
+        if "adzuna" not in url:
+            return FakeResp({"results": []})
+        calls.append(url)
+        if url.endswith("/3"):
+            raise feeds.requests.HTTPError("429 Client Error: Too Many Requests")
+        return FakeResp(ADZUNA_PAYLOAD)
+
+    feed = JobFeed(adzuna_id="id", adzuna_key="key")
+    with patch.object(feeds.requests, "get", side_effect=get):
+        data = feed.search("", max_age=0)
+        assert data["errors"] == [] and any(j["source"] == "adzuna" for j in data["jobs"])
+        n = len(calls)
+        feed.search("", max_age=0)          # a fresh page load within 30 min reuses Adzuna
+        assert len(calls) == n

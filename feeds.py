@@ -275,10 +275,24 @@ def _adzuna_page(app_id: str, app_key: str, q: str, page: int) -> list[dict]:
     return r.json().get("results", [])
 
 
-def fetch_adzuna(app_id: str, app_key: str, q: str, pages: int = 5) -> list[dict]:
-    # Pages are fetched at the same time: one after another took ~15s.
+ADZUNA_PAGES = 3
+ADZUNA_TTL = 30 * 60  # Adzuna's free plan allows ~25 requests a minute and 250 a day
+
+
+def fetch_adzuna(app_id: str, app_key: str, q: str, pages: int = ADZUNA_PAGES) -> list[dict]:
+    # Pages are fetched at the same time (one after another took ~15s). A page that's
+    # refused (e.g. rate-limited) is skipped; only if every page fails does Adzuna count as down.
+    def safe(n):
+        try:
+            return _adzuna_page(app_id, app_key, q, n)
+        except requests.RequestException as e:
+            log.warning("Adzuna page %s failed: %s", n, e)
+            return None
+
     with ThreadPoolExecutor(max_workers=pages) as pool:
-        page_results = list(pool.map(lambda n: _adzuna_page(app_id, app_key, q, n), range(1, pages + 1)))
+        page_results = [p for p in pool.map(safe, range(1, pages + 1)) if p is not None]
+    if not page_results:
+        raise RuntimeError("every Adzuna page failed")
     out = []
     for results in page_results:
         for j in results:
@@ -472,6 +486,7 @@ class JobFeed:
         self._cache: dict[str, tuple[float, dict]] = {}
         self._lock = threading.Lock()
         self._by_id: dict[str, dict] = {}
+        self._adzuna_cache: dict[str, tuple[float, list[dict]]] = {}
 
     @property
     def live_sources(self) -> list[str]:
@@ -504,7 +519,7 @@ class JobFeed:
             if self.reed_key:
                 tasks["Reed"] = pool.submit(fetch_reed, self.reed_key, q)
             if self.adzuna_id and self.adzuna_key:
-                tasks["Adzuna"] = pool.submit(fetch_adzuna, self.adzuna_id, self.adzuna_key, q)
+                tasks["Adzuna"] = pool.submit(self._adzuna_cached, q, force)
             if self.careerjet_key:
                 tasks["Careerjet"] = pool.submit(fetch_careerjet, self.careerjet_key, q, user_ip, user_agent)
             if self.jooble_key:
@@ -575,6 +590,23 @@ class JobFeed:
             for j in merged:
                 self._by_id[j["id"]] = j
         return result
+
+    def _adzuna_cached(self, q: str, force: bool) -> list[dict]:
+        """Adzuna results are reused for 30 minutes to stay inside its rate limits."""
+        key = q.lower()
+        with self._lock:
+            hit = self._adzuna_cache.get(key)
+        if hit and not force and time.time() - hit[0] < ADZUNA_TTL:
+            return hit[1]
+        try:
+            jobs = fetch_adzuna(self.adzuna_id, self.adzuna_key, q)
+        except Exception:
+            if hit:  # Adzuna refused us: show the last good results rather than nothing
+                return hit[1]
+            raise
+        with self._lock:
+            self._adzuna_cache[key] = (time.time(), jobs)
+        return jobs
 
     def get(self, job_id: str) -> dict | None:
         with self._lock:
