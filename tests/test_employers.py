@@ -75,7 +75,8 @@ def test_feed_merges_employer_jobs_and_reports_dead_boards():
     assert data["live_sources"] == ["employers"]
     ids = [j["id"] for j in data["jobs"]]
     assert "greenhouse:gh:1" in ids and "lever:lv:abc" in ids and "ashby:ab:z1" not in ids
-    assert data["errors"] == ["1 employer job boards are not responding right now"]
+    # 1 of 4 boards down is below the 25% threshold: logged, not shown to visitors.
+    assert data["errors"] == []
     assert feed.get("greenhouse:gh:1")["sector"] == "Technology"
 
 

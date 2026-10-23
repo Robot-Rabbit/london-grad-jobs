@@ -55,11 +55,11 @@ class FakeResp:
 
 def fake_get(url, params=None, auth=None, timeout=None):
     if "reed" in url:
-        assert params["graduate"] == "true" and params["locationName"] == "London"
-        assert auth == ("reed-key", "")
-        return FakeResp(REED_PAYLOAD)
+        assert params["locationName"] == "London" and auth == ("reed-key", "")
+        # Graduate-flagged search returns the fixtures; the extra entry-level searches return nothing.
+        return FakeResp(REED_PAYLOAD if params.get("graduate") == "true" else {"results": []})
     if "adzuna" in url:
-        assert params["where"] == "London" and params["what"].startswith("graduate")
+        assert params["where"] == "London" and "graduate" in params["what_or"]
         return FakeResp(ADZUNA_PAYLOAD)
     raise AssertionError(url)
 
@@ -159,6 +159,8 @@ def test_reed_pages_through_results():
     calls = []
 
     def paged(url, params=None, auth=None, timeout=None):
+        if params.get("graduate") != "true":
+            return FakeResp({"results": []})  # entry-level searches
         calls.append(params["resultsToSkip"])
         n = 100 if params["resultsToSkip"] < 200 else 50
         return FakeResp({"totalResults": 250, "results": [
@@ -217,3 +219,57 @@ def test_page_load_gets_fresh_data_but_not_more_than_once_a_minute():
         assert len(calls) == 2          # older than a minute: fetched again
         c.get("/api/jobs?refresh=1")
         assert len(calls) == 3          # Refresh always fetches
+
+
+
+def test_senior_roles_dropped_and_entry_roles_kept():
+    from feeds import level_of, too_senior
+    assert too_senior("Bank Senior Occupational Therapist")
+    assert too_senior("Lead Data Engineer") and too_senior("Head of Marketing") and too_senior("Finance Manager")
+    assert not too_senior("Graduate Project Manager") and not too_senior("Assistant Manager - Trainee")
+    assert not too_senior("Lead Generation Executive")
+    assert too_senior("Data Analyst", "You will have 3+ years of relevant experience in SQL.")
+    assert too_senior("Associate Solicitor", "2-4 years PQE")
+    assert not too_senior("Customer Service Advisor", "No experience needed, full training given.")
+    assert not too_senior("Graduate Analyst", "1 year experience preferred")
+    assert too_senior("Marketing Executive", "minimum of 2 years' experience")
+
+    assert level_of("Graduate Analyst") == "graduate"
+    assert level_of("Junior Account Executive") == "entry"
+    assert level_of("Customer Service Advisor", "No experience required - full training provided") == "entry"
+    assert level_of("Customer Service Advisor", "Great team") is None
+
+
+def test_entry_level_search_results_are_merged_and_labelled():
+    def get(url, params=None, auth=None, timeout=None):
+        if params.get("graduate") == "true":
+            return FakeResp({"results": [
+                {"jobId": 1, "jobTitle": "Bank Senior Occupational Therapist", "employerName": "Care"},
+                {"jobId": 2, "jobTitle": "Analyst", "employerName": "Grad-flagged Co"}]})
+        if params["keywords"].startswith("trainee"):
+            return FakeResp({"results": [
+                {"jobId": 3, "jobTitle": "Trainee Recruitment Consultant", "employerName": "R"},
+                {"jobId": 4, "jobTitle": "Warehouse Operative", "employerName": "W", "jobDescription": "Busy site"},
+                {"jobId": 5, "jobTitle": "Customer Advisor", "employerName": "C",
+                 "jobDescription": "No experience needed, full training given."}]})
+        return FakeResp({"results": []})
+
+    with patch.object(feeds.requests, "get", side_effect=get):
+        data = JobFeed(reed_key="k").search("")
+    live = {j["id"]: j["level"] for j in data["jobs"] if j["source"] == "reed"}
+    # Senior role dropped; Reed's graduate flag counts; entry roles kept; no starter signal dropped.
+    assert live == {"reed:2": "graduate", "reed:3": "entry", "reed:5": "entry"}
+    assert all(j["level"] == "graduate" for j in data["jobs"] if j["source"] == "scheme")
+
+
+def test_manager_roles_need_a_starter_word():
+    from feeds import too_senior
+    assert too_senior("Programme Performance Manager, Apprenticeship Units")
+    assert not too_senior("Trainee Product Manager")
+
+
+def test_course_adverts_are_not_jobs():
+    from feeds import is_course_ad
+    assert is_course_ad("Trainee UX/UI Designer | No experience needed (Ref: 7902)", "UX/UI DESIGN TRAINEESHIP (REMOTE) Become a UX/UI Designer")
+    assert is_course_ad("Trainee Data Analyst", "A small course fee applies")
+    assert not is_course_ad("Trainee Accountant", "Join our audit team; we pay for your ACA exams.")

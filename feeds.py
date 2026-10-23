@@ -26,6 +26,7 @@ JOOBLE_SEARCH = "https://jooble.org/api/{key}"
 CAREERJET_SEARCH = "https://search.api.careerjet.net/v4/query"
 TIMEOUT = 10
 CACHE_TTL = 15 * 60
+BOARDS_MIN_AGE = 15 * 60
 
 # Order matters: first match wins.
 SECTOR_RULES = [
@@ -56,6 +57,71 @@ def classify(title: str, extra: str = "") -> str:
             if re.search(pattern, text):
                 return sector
     return "Other"
+
+
+# ---------------------------------------------------------------- level
+# Roles for people starting out: graduate jobs and schemes, plus entry-level roles that
+# need no experience. Senior roles that slip through job boards' filters are dropped.
+GRADUATE_TITLE = re.compile(r"graduate|\bgrads?\b|new grad|\b20(26|27)\b|analyst programme|analyst program", re.I)
+ENTRY_TITLE = re.compile(
+    r"\bjunior\b|\bjnr\b|trainee|entry[- ]level|\bapprentice\b|\bassistant\b|\bintern(ship)?\b|"
+    r"school leaver|first job|no experience|early careers?|early talent|\bassociate\b|\btrainee\b",
+    re.I,
+)
+ENTRY_TEXT = re.compile(
+    r"no (previous |prior |formal )?experience (is )?(needed|required|necessary)|"
+    r"full training (will be |is )?(given|provided)|entry[- ]level|first step in your career|"
+    r"perfect for (a )?(recent )?graduates?|ideal for (school leavers|graduates|someone starting)",
+    re.I,
+)
+SENIOR_TITLE = re.compile(
+    r"\bsenior\b|\bsnr\b|\bsr\.?\b|principal|\bstaff (engineer|scientist|developer)|head of|director|"
+    r"\bchief\b|\bvp\b|vice president|\blead\b(?!\s*gen)|experienced|\bexpert\b|\bconsultant (psychiatrist|surgeon)",
+    re.I,
+)
+MANAGER_TITLE = re.compile(r"\bmanager\b", re.I)
+MANAGER_OK = re.compile(r"trainee|graduate|junior|assistant", re.I)
+YEARS_EXPERIENCE = re.compile(
+    r"(?:minimum (?:of )?|at least )?(\d{1,2})\s*\+?\s*(?:-\s*\d{1,2}\s*)?years?[\u2019']?\s+(?:of\s+)?"
+    r"(?:relevant\s+|proven\s+|professional\s+|commercial\s+|industry\s+|demonstrable\s+|post[- ]qualification\s+)?"
+    r"(?:experience|pqe)|(\d{1,2})\s*\+?\s*years?\s*pqe",
+    re.I,
+)
+
+
+# Training courses advertised as jobs ("traineeships", often with fees) aren't real vacancies.
+COURSE_AD = re.compile(
+    r"\btraineeships?\b|course fees?|enrol(?:l)?ment fee|tuition fee|funded course|"
+    r"pay (?:for|towards) (?:the|your) (?:course|training)|training provider",
+    re.I,
+)
+
+
+def is_course_ad(title: str, description: str = "") -> bool:
+    return bool(COURSE_AD.search(f"{title} {description or ''}"))
+
+
+def too_senior(title: str, description: str = "") -> bool:
+    """True for roles aimed at experienced hires rather than people starting out."""
+    if SENIOR_TITLE.search(title):
+        return True
+    if MANAGER_TITLE.search(title) and not MANAGER_OK.search(title):
+        return True
+    # Asking for 2+ years' experience, or any post-qualification experience (PQE), means it isn't a starter role.
+    for m in YEARS_EXPERIENCE.finditer(description or ""):
+        years = int(m.group(1) or m.group(2))
+        if years >= 2 or "pqe" in m.group(0).lower():
+            return True
+    return False
+
+
+def level_of(title: str, description: str = "", default: str | None = None) -> str | None:
+    """'graduate', 'entry', or `default` when neither the title nor text says."""
+    if GRADUATE_TITLE.search(title):
+        return "graduate"
+    if ENTRY_TITLE.search(title) or ENTRY_TEXT.search(description or ""):
+        return "entry"
+    return default
 
 
 def clean_text(s: str, limit: int = 4000) -> str:
@@ -121,31 +187,43 @@ REED_PAGE = 100
 REED_MAX = 400
 
 
-def _reed_page(api_key: str, q: str, skip: int) -> dict:
+REED_ENTRY_KEYWORDS = ("entry level", "trainee", "junior", "no experience")
+
+
+def _reed_page(api_key: str, keywords: str, skip: int, graduate: bool = True) -> dict:
     params = {
-        "keywords": q or "graduate",
+        "keywords": keywords,
         "locationName": "London",
         "distanceFromLocation": 15,
-        "graduate": "true",
         "resultsToTake": REED_PAGE,
         "resultsToSkip": skip,
     }
+    if graduate:
+        params["graduate"] = "true"
     r = requests.get(REED_SEARCH, params=params, auth=(api_key, ""), timeout=TIMEOUT)
     r.raise_for_status()
     return r.json()
 
 
 def fetch_reed(api_key: str, q: str) -> list[dict]:
-    first = _reed_page(api_key, q, 0)
-    results = list(first.get("results", []))
+    """Reed's graduate-flagged jobs (up to REED_MAX), plus one page each of entry-level
+    searches so roles for people with no experience show up too."""
+    first = _reed_page(api_key, q or "graduate", 0)
+    results = [(j, "graduate") for j in first.get("results", [])]
     total = min(int(first.get("totalResults") or 0), REED_MAX)
-    skips = range(REED_PAGE, total, REED_PAGE)
-    if skips:
-        with ThreadPoolExecutor(max_workers=5) as pool:
-            for page in pool.map(lambda sk: _reed_page(api_key, q, sk), skips):
-                results.extend(page.get("results", []))
-    out = []
-    for j in results:
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        grad_pages = pool.map(lambda sk: _reed_page(api_key, q or "graduate", sk), range(REED_PAGE, total, REED_PAGE))
+        entry_pages = pool.map(lambda kw: _reed_page(api_key, f"{kw} {q}".strip(), 0, graduate=False),
+                               REED_ENTRY_KEYWORDS)
+        for page in grad_pages:
+            results += [(j, "graduate") for j in page.get("results", [])]
+        for page in entry_pages:
+            results += [(j, None) for j in page.get("results", [])]
+    out, seen = [], set()
+    for j, flagged in results:
+        if j.get("jobId") in seen:
+            continue
+        seen.add(j.get("jobId"))
         lo, hi = j.get("minimumSalary"), j.get("maximumSalary")
         title = j.get("jobTitle") or ""
         desc = clean_text(j.get("jobDescription", ""))
@@ -165,6 +243,8 @@ def fetch_reed(api_key: str, q: str) -> list[dict]:
             "description": desc,
             "url": j.get("jobUrl") or f"https://www.reed.co.uk/jobs/{j.get('jobId')}",
             "sector": classify(title, desc[:300]),
+            # Reed's graduate flag counts as a graduate signal when the title says nothing.
+            "level": level_of(title, desc, flagged),
         })
     return out
 
@@ -176,23 +256,31 @@ def fetch_reed_detail(api_key: str, job_id: str) -> str:
 
 
 # ---------------------------------------------------------------- Adzuna
+def _adzuna_page(app_id: str, app_key: str, q: str, page: int) -> list[dict]:
+    params = {
+        "app_id": app_id,
+        "app_key": app_key,
+        # Any of these words, plus the visitor's own search terms if they gave any.
+        "what_or": "graduate trainee junior apprentice entry",
+        **({"what": q} if q else {}),
+        "where": "London",
+        "distance": 25,  # km
+        "max_days_old": 45,
+        "results_per_page": 50,
+        "sort_by": "date",
+        "content-type": "application/json",
+    }
+    r = requests.get(ADZUNA_SEARCH.format(page=page), params=params, timeout=TIMEOUT)
+    r.raise_for_status()
+    return r.json().get("results", [])
+
+
 def fetch_adzuna(app_id: str, app_key: str, q: str, pages: int = 5) -> list[dict]:
+    # Pages are fetched at the same time: one after another took ~15s.
+    with ThreadPoolExecutor(max_workers=pages) as pool:
+        page_results = list(pool.map(lambda n: _adzuna_page(app_id, app_key, q, n), range(1, pages + 1)))
     out = []
-    for page in range(1, pages + 1):
-        params = {
-            "app_id": app_id,
-            "app_key": app_key,
-            "what": f"graduate {q}".strip(),
-            "where": "London",
-            "distance": 25,  # km
-            "max_days_old": 45,
-            "results_per_page": 50,
-            "sort_by": "date",
-            "content-type": "application/json",
-        }
-        r = requests.get(ADZUNA_SEARCH.format(page=page), params=params, timeout=TIMEOUT)
-        r.raise_for_status()
-        results = r.json().get("results", [])
+    for results in page_results:
         for j in results:
             lo, hi = j.get("salary_min"), j.get("salary_max")
             title = clean_text(j.get("title", ""))
@@ -215,9 +303,8 @@ def fetch_adzuna(app_id: str, app_key: str, q: str, pages: int = 5) -> list[dict
                 "description": desc,
                 "url": j.get("redirect_url"),
                 "sector": classify(title, f"{category} {desc[:300]}"),
+                "level": level_of(title, desc, "graduate" if "graduate" in category.lower() else None),
             })
-        if len(results) < 50:
-            break
     return out
 
 
@@ -248,9 +335,13 @@ def _any_date(value) -> str | None:
 
 
 def fetch_jooble(api_key: str, q: str, pages: int = 3) -> list[dict]:
+    return _jooble_pass(api_key, f"graduate {q}".strip(), pages) + _jooble_pass(api_key, f"entry level {q}".strip(), 2)
+
+
+def _jooble_pass(api_key: str, keywords: str, pages: int) -> list[dict]:
     out = []
     for page in range(1, pages + 1):
-        body = {"keywords": f"graduate {q}".strip(), "location": "London", "radius": "25",
+        body = {"keywords": keywords, "location": "London", "radius": "25",
                 "page": str(page), "ResultOnPage": "50"}
         r = requests.post(JOOBLE_SEARCH.format(key=api_key), json=body, timeout=TIMEOUT)
         r.raise_for_status()
@@ -276,6 +367,7 @@ def fetch_jooble(api_key: str, q: str, pages: int = 3) -> list[dict]:
                 "description": desc,
                 "url": j.get("link"),
                 "sector": classify(title, desc[:300]),
+                "level": level_of(title, desc, "graduate" if keywords.startswith("graduate") else None),
             })
         if len(jobs) < 50:
             break
@@ -287,11 +379,16 @@ CAREERJET_PERIOD = {"Y": "year", "M": "month", "W": "week", "D": "day", "H": "ho
 
 
 def fetch_careerjet(api_key: str, q: str, user_ip: str, user_agent: str, pages: int = 3) -> list[dict]:
+    return (_careerjet_pass(api_key, f"graduate {q}".strip(), user_ip, user_agent, pages)
+            + _careerjet_pass(api_key, f"entry level {q}".strip(), user_ip, user_agent, 2))
+
+
+def _careerjet_pass(api_key: str, keywords: str, user_ip: str, user_agent: str, pages: int) -> list[dict]:
     out = []
     for page in range(1, pages + 1):
         params = {
             "locale_code": "en_GB",
-            "keywords": f"graduate {q}".strip(),
+            "keywords": keywords,
             "location": "London",
             "radius": 25,
             "page": page,
@@ -328,6 +425,7 @@ def fetch_careerjet(api_key: str, q: str, user_ip: str, user_agent: str, pages: 
                 "description": desc,
                 "url": url,
                 "sector": classify(title, desc[:300]),
+                "level": level_of(title, desc, "graduate" if keywords.startswith("graduate") else None),
             })
         if page >= int(data.get("pages") or 1):
             break
@@ -338,6 +436,21 @@ def fetch_careerjet(api_key: str, q: str, user_ip: str, user_agent: str, pages: 
 def _key(job):
     norm = lambda s: re.sub(r"[^a-z0-9]", "", (s or "").lower())
     return norm(job["employer"]), norm(job["title"])
+
+
+_TITLE_NOISE = re.compile(r"\b(20\d\d|full[- ]time|london|uk|united kingdom|programme|program|analyst|graduate)\b", re.I)
+
+
+def _core_title(title: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", _TITLE_NOISE.sub(" ", title.lower()))
+
+
+def same_role(a: dict, b: dict) -> bool:
+    """Same employer and one title's core words contained in the other's."""
+    if re.sub(r"[^a-z]", "", a["employer"].lower())[:6] != re.sub(r"[^a-z]", "", b["employer"].lower())[:6]:
+        return False
+    ca, cb = _core_title(a["title"]), _core_title(b["title"])
+    return len(min(ca, cb, key=len)) >= 8 and (ca in cb or cb in ca)
 
 
 def _matches(job, q: str) -> bool:
@@ -385,7 +498,9 @@ class JobFeed:
 
         tasks, errors = {}, []
         with ThreadPoolExecutor(max_workers=5) as pool:
-            boards_fut = pool.submit(self.boards.jobs, force, max_age) if self.boards else None
+            # ~55 employer careers sites: re-read at most every 15 minutes (unless Refresh is
+            # pressed) so page loads stay quick and the sites don't rate-limit us.
+            boards_fut = pool.submit(self.boards.jobs, force, max(max_age, BOARDS_MIN_AGE)) if self.boards else None
             if self.reed_key:
                 tasks["Reed"] = pool.submit(fetch_reed, self.reed_key, q)
             if self.adzuna_id and self.adzuna_key:
@@ -405,14 +520,33 @@ class JobFeed:
             employer_jobs = []
             if boards_fut:
                 employer_jobs, failed = boards_fut.result()
-                employer_jobs = [dict(j, sector=classify(j["title"], j["description"][:300])) for j in employer_jobs]
-                if failed:
-                    errors.append(f"{len(failed)} employer job boards are not responding right now")
+                employer_jobs = [dict(j, sector=classify(j["title"], j["description"][:300]),
+                                      level=level_of(j["title"], "", "graduate")) for j in employer_jobs]
+                # With dozens of careers sites a few are always slow or down; only tell visitors
+                # when a big share fails (the rest is in the logs).
+                if failed and len(failed) > len(self.boards.employers) / 4:
+                    errors.append(f"{len(failed)} employer careers sites are not responding right now")
+                elif failed:
+                    log.info("Employer careers sites not responding: %s", ", ".join(failed))
 
-        schemes = [dict(j, sector=classify(j["title"]), salary_annual=j["salary_min"]) for j in curated_jobs()]
+        schemes = [dict(j, sector=classify(j["title"]), salary_annual=j["salary_min"], level="graduate")
+                   for j in curated_jobs()]
         if q:
             schemes = [j for j in schemes if _matches(j, q)]
             employer_jobs = [j for j in employer_jobs if _matches(j, q)]
+
+        # The hand-checked scheme list and an employer's own feed can list the same role under
+        # slightly different titles ("2027 - Global Investment Banking Analyst Program - Full-Time
+        # - London"). Keep the live listing, carrying over the scheme list's closing date.
+        employer_jobs = list(employer_jobs)
+        kept_schemes = []
+        for sch in schemes:
+            twin = next((j for j in employer_jobs if same_role(sch, j)), None)
+            if twin:
+                twin["deadline"] = twin.get("deadline") or sch["deadline"]
+            else:
+                kept_schemes.append(sch)
+        schemes = kept_schemes
 
         merged, seen = [], set()
         # Schemes first so their deadlines win on duplicates, then employers' own listings.
@@ -425,6 +559,10 @@ class JobFeed:
 
         today = date.today().isoformat()
         merged = [j for j in merged if not j["deadline"] or j["deadline"] >= today]
+        # Starter roles only: drop senior roles, and roles nothing marks as graduate or entry level.
+        merged = [j for j in merged if j["source"] == "scheme"
+                  or (j.get("level") and not too_senior(j["title"], j.get("description", ""))
+                      and not is_course_ad(j["title"], j.get("description", "")))]
 
         result = {
             "jobs": merged,

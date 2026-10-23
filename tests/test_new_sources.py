@@ -72,7 +72,7 @@ def test_careerjet():
 def test_feed_prefers_reed_over_aggregator_duplicates():
     reed = [{"id": "reed:1", "source": "reed", "employer": "Acme", "title": "Graduate Analyst", "area": "London",
              "salary_min": None, "salary_max": None, "salary_label": "", "deadline": None, "posted": None,
-             "description": "", "url": "u", "sector": "Finance", "applicants": 3}]
+             "description": "", "url": "u", "sector": "Finance", "applicants": 3, "level": "graduate"}]
     dup = [dict(reed[0], id="jooble:1", source="jooble", applicants=None)]
     with patch.object(feeds, "fetch_reed", return_value=reed), patch.object(feeds, "fetch_jooble", return_value=dup):
         data = JobFeed(reed_key="k", jooble_key="j").search("analyst")
@@ -144,3 +144,54 @@ def test_smartrecruiters_and_workable_use_entry_level_flags():
 
 def test_tidy_workday_locations():
     assert tidy_location("GBR-London-5 Canada Square") == "London (5 Canada Square)"
+
+
+def test_oracle_reads_london_postings_by_location_id():
+    from employers import fetch_oracle
+
+    def get(url, params=None, headers=None, timeout=None):
+        finder = params["finder"]
+        if "facetsList=LOCATIONS" in finder:
+            return R({"items": [{"locationsFacet": [{"Id": 1, "Name": "LONDON, United Kingdom"},
+                                                    {"Id": 2, "Name": "Mumbai, India"}]}]})
+        assert "selectedLocationsFacet=1" in finder
+        return R({"items": [{"TotalJobsCount": 2, "requisitionList": [
+            {"Id": "11", "Title": "2027 - Global Investment Banking Analyst Program", "PrimaryLocation": "LONDON, United Kingdom",
+             "PostedDate": "2026-09-22", "ShortDescriptionStr": "Join us"},
+            {"Id": "12", "Title": "Executive Director, Credit", "PrimaryLocation": "LONDON, United Kingdom", "PostedDate": "2026-09-22"},
+        ]}]})
+
+    with patch.object(employers.requests, "get", side_effect=get):
+        jobs = fetch_oracle("jpmc.fa:CX_1001", "J.P. Morgan", clean_text)
+    assert [j["id"] for j in jobs] == ["oracle:jpmc:11"]
+    assert jobs[0]["url"] == "https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/job/11"
+    assert jobs[0]["posted"] == "2026-09-22" and jobs[0]["area"] == "London, United Kingdom"
+
+
+def test_eightfold():
+    from employers import fetch_eightfold
+
+    def get(url, params=None, timeout=None):
+        assert params["domain"] == "bcg.com"
+        return R({"positions": [
+            {"id": 7, "name": "Associate, Graduate 2027", "location": "London, United Kingdom", "t_create": 1790000000,
+             "canonicalPositionUrl": "https://careers.bcg.com/job/7", "job_description": "<p>Consulting</p>"},
+            {"id": 8, "name": "Junior Analyst", "location": "Paris, France"}]})
+
+    with patch.object(employers.requests, "get", side_effect=get):
+        jobs = fetch_eightfold("bcg:bcg.com", "BCG", clean_text)
+    assert [j["id"] for j in jobs] == ["eightfold:bcg:7"] and jobs[0]["posted"] == "2026-09-21"
+
+
+def test_london_places():
+    from employers import is_london
+    assert is_london("Osterley") and is_london("Canary Wharf") and is_london("SW1P 2DY")
+    assert not is_london("Stratford-upon-Avon") and not is_london("Harrogate") and not is_london("NE1 4XF")
+
+
+def test_scheme_and_live_listing_merge_keeping_deadline():
+    from feeds import same_role
+    a = {"employer": "J.P. Morgan", "title": "Global Investment Banking Analyst Program"}
+    b = {"employer": "J.P. Morgan", "title": "2027 - Global Investment Banking Analyst Program - Full-Time - London"}
+    c = {"employer": "J.P. Morgan", "title": "2027 - Corporate Functions - Corporate Analyst Development Program"}
+    assert same_role(a, b) and not same_role(a, c)

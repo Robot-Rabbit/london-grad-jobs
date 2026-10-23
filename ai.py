@@ -100,14 +100,14 @@ MATCH_SCHEMA = {
 
 def smart_match(request: str, profile: str, jobs: list[dict]) -> list[dict]:
     lines = "\n".join(
-        f"{j['id']} | {j['employer']} | {j['title']} | {j.get('sector', '')} | {j['area']} | "
+        f"{j['id']} | {j['employer']} | {j['title']} | {j.get('sector', '')} | {j.get('level') or 'graduate'} | {j['area']} | "
         f"{j['salary_label'] or 'salary not listed'} | closes {j['deadline'] or 'n/a'}"
         for j in jobs[:200]
     )
     prompt = (
         f"<request>\n{request or '(none: match on the profile alone)'}\n</request>\n\n"
         f"{_profile_block(profile)}\n\n"
-        f"Open London roles (id | employer | title | sector | area | salary | closing date):\n{lines}\n\n"
+        f"Open London roles (id | employer | title | sector | level: graduate or entry | area | salary | closing date):\n{lines}\n\n"
         "Pick up to 8 roles that best fit the request and profile, best first. Use only ids "
         "from the list. For each, give one sentence (max 25 words) linking the role to the "
         "request or to something specific in the profile."

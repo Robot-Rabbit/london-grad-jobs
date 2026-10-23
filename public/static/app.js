@@ -26,7 +26,7 @@ const fmtTime = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-d
 
 // ---------- state ----------
 const state = { q: "", data: null, loading: false, sector: "All", source: "all", win: "any", sort: "newest", newIds: new Set(),
-  salOnly: false, savedOnly: false, appliedView: "all", shown: PAGE, ai: null, target: null, error: "" };
+  salOnly: false, savedOnly: false, appliedView: "all", level: "all", shown: PAGE, ai: null, target: null, error: "" };
 
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
@@ -87,6 +87,7 @@ function allJobs() {
 function filtered() {
   let list = allJobs().filter(j => {
     if (state.appliedView === "hide" && applied.has(j.id)) return false;
+    if (state.level !== "all" && (j.level || "graduate") !== state.level) return false;
     if (state.sector !== "All" && j.sector !== state.sector) return false;
     if (state.source !== "all" && j.source !== state.source) return false;
     if (state.salOnly && !j.salary_min) return false;
@@ -213,6 +214,7 @@ function render() {
         <h3>${esc(j.title)}</h3>
         <div class="meta">
           <span class="src ${j.source}">${SRC_LABEL[j.source] || esc(j.source)}</span>
+          <span class="lvl ${j.level === "entry" ? "entry" : ""}">${j.level === "entry" ? "Entry level" : "Graduate"}</span>
           <span>${esc(j.sector)}</span>
           <span>${esc(j.area)}</span>
           <span>${j.salary_label ? `<b>${esc(j.salary_label)}</b>` : "Salary not listed"}</span>
@@ -263,7 +265,7 @@ $("qform").addEventListener("submit", e => {
 const bind = (id, key, ev = "change", prop = "value") => $(id).addEventListener(ev, e => {
   state[key] = e.target[prop]; state.shown = PAGE; if (key === "sort") clearAi(); if (key === "savedOnly") renderChips(); render();
 });
-bind("source", "source"); bind("window", "win"); bind("sort", "sort");
+bind("source", "source"); bind("level", "level"); bind("window", "win"); bind("sort", "sort");
 bind("salOnly", "salOnly", "change", "checked"); bind("appliedView", "appliedView"); bind("savedOnly", "savedOnly", "change", "checked");
 
 // ---------- profile ----------

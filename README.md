@@ -6,11 +6,15 @@ A search site for London graduate jobs and 2027-intake graduate schemes. It has:
   [Reed](https://www.reed.co.uk/developers/jobseeker) (using its `graduate=true` filter) and
   [Adzuna](https://developer.adzuna.com), merges them, removes duplicates and expired
   listings, and caches each search for 15 minutes.
-- **Employer careers sites.** Reads the public job-board APIs that employers publish
-  through Greenhouse, Lever, Ashby, SmartRecruiters and Workable, plus Workday careers
-  sites (Citi, LSEG, Barclays, Morgan Stanley and others). It keeps London roles whose titles look
-  graduate-level, such as "Graduate", "New Grad", "Junior" or "2027". The employer list is
-  `EMPLOYERS` in `employers.py`. This feed needs no keys, and results are cached for 30 minutes.
+- **Employer careers sites.** Reads the public job feeds of about 75 employers' own
+  careers sites, run on Workday, Oracle Cloud, Greenhouse, Lever, Ashby, SmartRecruiters,
+  Workable and Eightfold. That includes 37 FTSE 100 and Top 100 Graduate Employers (see
+  `COVERAGE.md`). It keeps London roles whose titles look like
+  starter roles, such as "Graduate", "New Grad", "Junior", "Trainee", "Apprentice" or "2027". The employer list is
+  `EMPLOYERS` in `employers.py`. This feed needs no keys, and it's re-read at most every 15 minutes.
+- **Starter roles only.** Graduate jobs and schemes plus entry-level roles that need no
+  experience. Senior roles (Senior, Lead, Head of, managers, 2+ years' experience, PQE)
+  and training-course adverts are filtered out.
 - **Graduate scheme snapshot.** A hand-checked list of big-employer schemes (J.P. Morgan,
   Lazard, Shell, FTI and others) in `curated.py`. These rarely appear on Reed or Adzuna,
   so they are merged into every search.

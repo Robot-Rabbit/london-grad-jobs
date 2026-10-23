@@ -81,10 +81,40 @@ EMPLOYERS = [
     ("workday", "blackrock:1:BlackRock_Professional", "BlackRock"),
     ("workday", "mastercard:1:CorporateCareers", "Mastercard"),
     ("workday", "unilever:3:Unilever_Early_Careers", "Unilever"),
+    # FTSE 100 and Top 100 Graduate Employers whose careers sites publish open job feeds
+    ("workday", "unilever:3:Unilever_Experienced_Professionals", "Unilever"),
+    ("workday", "shell:3:shellcareers", "Shell"),
+    ("workday", "bpinternational:3:bpCareers", "BP"),
+    ("workday", "relx:3:relx", "RELX"),
+    ("workday", "diageo:3:Diageo_Careers", "Diageo"),
+    ("workday", "iaggbs:103:IAGGBS", "IAG (British Airways group)"),
+    ("workday", "landsecurities:3:Landseccareers", "Landsec"),
+    ("workday", "mgpru:3:mandgprudential", "M&G"),
+    ("workday", "prudential:3:prudential", "Prudential"),
+    ("workday", "smithnephew:5:External", "Smith & Nephew"),
+    ("workday", "sky:3:sky_careers", "Sky"),
+    ("workday", "lloyds:3:Lloyds-of-London", "Lloyd's of London"),
+    ("workday", "aviva:1:External", "Aviva"),
+    ("workday", "thales:3:Careers", "Thales"),
+    ("workday", "pwc:3:Global_Campus_Careers", "PwC"),
+    ("workday", "accenture:103:AccentureCareers", "Accenture"),
+    ("workday", "linklaters:3:Linklaters", "Linklaters"),
+    ("workday", "freshfields:3:FBD_101", "Freshfields"),
+    ("workday", "mmc:1:MMC", "Marsh McLennan (Oliver Wyman, Mercer, Marsh)"),
+    ("workday", "forvismazarsuk:107:FM_1", "Forvis Mazars"),
+    ("smartrecruiters", "InformaGroupPlc", "Informa"),
+    ("smartrecruiters", "RentokilInitial1", "Rentokil Initial"),
+    ("eightfold", "bcg:bcg.com", "BCG"),
+    ("oracle", "jpmc.fa:CX_1001", "J.P. Morgan"),
+    ("oracle", "fa-eqid-saasfaprod1.fa.ocs:CX_1", "Marks & Spencer"),
+    ("oracle", "hccz.fa.em3:CX_2", "Pearson"),
+    ("oracle", "fa-enor-saasfaprod1.fa.ocs:CX", "Phoenix Group"),
+    ("oracle", "ekbq.fa.em2:CX_2", "Schroders"),
+    ("oracle", "hcog.fa.em2:CX_1", "Intertek"),
 ]
 
 GRADUATE = re.compile(
-    r"graduate|new grad|\bgrads?\b|early careers?|early talent|entry[- ]level|junior|trainee|"
+    r"graduate|new grad|\bgrads?\b|early careers?|early talent|entry[- ]level|junior|trainee|apprentice|"
     r"analyst programme|analyst program|\b20(26|27)\b",
     re.I,
 )
@@ -100,8 +130,19 @@ def is_graduate_role(title: str, entry_level: bool = False) -> bool:
     return (entry_level or bool(GRADUATE.search(title))) and not NOT_GRADUATE.search(title)
 
 
+# Places inside Greater London that employers name without saying "London".
+LONDON_PLACES = re.compile(
+    r"\b(?:london|canary wharf|osterley|isleworth|hounslow|brentford|chiswick|hammersmith|"
+    r"croydon|stratford(?![- ]upon)|wembley|uxbridge|stockley park|heathrow|greenwich|islington|camden|southwark|"
+    r"westminster|kensington|shoreditch|white city|paddington|holborn|king'?s cross|"
+    r"battersea|vauxhall|wimbledon|richmond upon thames|kingston upon thames|ealing|harrow|bromley)\b|"
+    r"\b(?:ec[1-4][a-z]?|wc[12][a-z]?|(?:e|n|nw|se|sw|w)1?\d[a-z]?)\s?\d[a-z]{2}\b",
+    re.I,
+)
+
+
 def is_london(location: str) -> bool:
-    return "london" in (location or "").lower()
+    return bool(LONDON_PLACES.search(location or ""))
 
 
 def _iso_day(value) -> str | None:
@@ -226,40 +267,151 @@ def fetch_workable(board: str, employer: str, clean) -> list[dict]:
     return out
 
 
-WORKDAY_SEARCHES = ("graduate london", "2027 london", "early careers london")
+WORKDAY_SEARCHES = ("graduate london", "junior london", "trainee london", "2027 london")
 WORKDAY_HEADERS = {"Accept": "application/json", "Content-Type": "application/json"}
+WORKDAY_MAX = 400  # London postings read per employer
+
+
+def _workday_london_facet(facets) -> tuple[str, list[str]] | None:
+    """Find the location filter and its London values. Workday nests them, e.g.
+    locationMainGroup -> locations -> "London - Shell Centre"."""
+    for f in facets or []:
+        ids = [v["id"] for v in f.get("values", []) if v.get("id") and is_london(v.get("descriptor", ""))]
+        if ids and "location" in (f.get("facetParameter") or "").lower():
+            return f["facetParameter"], ids
+        nested = [v for v in f.get("values", []) if "values" in v]
+        found = _workday_london_facet(nested)
+        if found:
+            return found
+    return None
 
 
 def fetch_workday(board: str, employer: str, clean) -> list[dict]:
     tenant, n, site = board.split(":")
     host = f"https://{tenant}.wd{n}.myworkdayjobs.com"
     api = f"{host}/wday/cxs/{tenant}/{site}"
+
+    def page(body):
+        r = requests.post(f"{api}/jobs", json=body, headers=WORKDAY_HEADERS, timeout=TIMEOUT)
+        r.raise_for_status()  # a bot challenge or block lands here and the board is skipped
+        return r.json()
+
     found = {}
-    for text in WORKDAY_SEARCHES:
-        for offset in range(0, 100, 20):
-            r = requests.post(f"{api}/jobs", json={"appliedFacets": {}, "limit": 20, "offset": offset,
-                                                   "searchText": text},
-                              headers=WORKDAY_HEADERS, timeout=TIMEOUT)
-            r.raise_for_status()  # a bot challenge or block lands here and the board is skipped
-            data = r.json()
-            for p in data.get("jobPostings", []):
+
+    def keep(postings):
+        for p in postings:
+            if p.get("externalPath"):  # some postings come back without one; they can't be opened
                 found.setdefault(p["externalPath"], p)
-            if offset + 20 >= (data.get("total") or 0):
-                break
+
+    first = page({"appliedFacets": {}, "limit": 20, "offset": 0, "searchText": ""})
+    facet = _workday_london_facet(first.get("facets"))
+    if facet:
+        # Every London posting, filtered by title here: catches "Junior …" and "Trainee …" roles too.
+        param, ids = facet
+        body = {"appliedFacets": {param: ids}, "limit": 20, "searchText": ""}
+        london = page(dict(body, offset=0))
+        keep(london.get("jobPostings", []))
+        total = min(int(london.get("total") or 0), WORKDAY_MAX)
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for data in pool.map(lambda off: page(dict(body, offset=off)), range(20, total, 20)):
+                keep(data.get("jobPostings", []))
+    else:
+        # No London location value to filter on: fall back to keyword searches.
+        for text in WORKDAY_SEARCHES:
+            for offset in range(0, 60, 20):
+                data = page({"appliedFacets": {}, "limit": 20, "offset": offset, "searchText": text})
+                keep(data.get("jobPostings", []))
+                if offset + 20 >= (data.get("total") or 0):
+                    break
+
     # "3 Locations" hides whether London is one of them, so check those in the detail.
     candidates = [p for p in found.values() if is_graduate_role(p.get("title", ""))
-                  and (is_london(p.get("locationsText", "")) or p.get("locationsText", "").endswith("Locations"))]
+                  and (facet or is_london(p.get("locationsText", "")) or p.get("locationsText", "").endswith("Locations"))]
+
+    def detail(p):
+        return p, requests.get(api + p["externalPath"], headers=WORKDAY_HEADERS, timeout=TIMEOUT).json().get("jobPostingInfo", {})
+
     out = []
-    for p in candidates:
-        info = requests.get(api + p["externalPath"], headers=WORKDAY_HEADERS, timeout=TIMEOUT).json().get("jobPostingInfo", {})
-        locs = [info.get("location") or ""] + list(info.get("additionalLocations") or [])
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for p, info in pool.map(detail, candidates):
+            locs = [info.get("location") or ""] + list(info.get("additionalLocations") or [])
+            loc = next((l for l in locs if is_london(l)), None)
+            if not loc:
+                continue
+            out.append(_job("workday", tenant, employer, info.get("jobReqId") or p["externalPath"], p["title"], loc,
+                            info.get("externalUrl") or f"{host}/{site}{p['externalPath']}",
+                            info.get("startDate"),  # the date the posting first went live
+                            clean(info.get("jobDescription", ""))))
+    return out
+
+
+ORACLE_HEADERS = {"Accept": "application/json"}
+ORACLE_MAX = 500
+
+
+def fetch_oracle(board: str, employer: str, clean) -> list[dict]:
+    """Oracle Recruiting Cloud career sites. `board` is "<host>:<site>", where the careers
+    site lives at https://<host>.oraclecloud.com/hcmUI/CandidateExperience/en/sites/<site>."""
+    host, site = board.split(":")
+    base = f"https://{host}.oraclecloud.com"
+    api = f"{base}/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
+
+    def search(extra: str, limit: int, offset: int = 0) -> dict:
+        finder = f"findReqs;siteNumber={site},limit={limit},offset={offset},sortBy=POSTING_DATES_DESC{extra}"
+        r = requests.get(api, params={"onlyData": "true", "expand": "requisitionList.secondaryLocations,locationsFacet",
+                                      "finder": finder}, headers=ORACLE_HEADERS, timeout=TIMEOUT)
+        r.raise_for_status()
+        items = r.json().get("items") or [{}]
+        return items[0]
+
+    # The location filter takes ids, so look up the London ones first.
+    facets = search(",facetsList=LOCATIONS,keyword=London", 1).get("locationsFacet") or []
+    london_ids = [f["Id"] for f in facets if is_london(f.get("Name", ""))]
+    found = {}
+
+    def london_pages(lid):
+        first = search(f",selectedLocationsFacet={lid}", 100)
+        total = min(int(first.get("TotalJobsCount") or 0), ORACLE_MAX)
+        pages = [first] + [search(f",selectedLocationsFacet={lid}", 100, off) for off in range(100, total, 100)]
+        return [q for p in pages for q in (p.get("requisitionList") or [])]
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for reqs in pool.map(london_pages, london_ids):
+            for q in reqs:
+                found.setdefault(q["Id"], q)
+    out = []
+    for q in found.values():
+        title = q.get("Title", "")
+        locs = [q.get("PrimaryLocation", "")] + [l.get("Name", "") for l in q.get("secondaryLocations") or []]
         loc = next((l for l in locs if is_london(l)), None)
-        if not loc:
-            continue
-        out.append(_job("workday", tenant, employer, info.get("jobReqId") or p["externalPath"], p["title"], loc,
-                        info.get("externalUrl") or f"{host}/{site}{p['externalPath']}",
-                        info.get("startDate"),  # the date the posting first went live
-                        clean(info.get("jobDescription", ""))))
+        if loc and is_graduate_role(title):
+            out.append(_job("oracle", host.split(".")[0], employer, q["Id"], title, loc.title(),
+                            f"{base}/hcmUI/CandidateExperience/en/sites/{site}/job/{q['Id']}",
+                            q.get("PostedDate"), clean(q.get("ShortDescriptionStr", ""))))
+    return out
+
+
+def fetch_eightfold(board: str, employer: str, clean) -> list[dict]:
+    """Eightfold career sites that allow public reads. `board` is "<subdomain>:<company domain>"."""
+    sub, domain = board.split(":")
+    api = f"https://{sub}.eightfold.ai/api/apply/v2/jobs"
+    out, start = [], 0
+    while start < 500:
+        r = requests.get(api, params={"domain": domain, "start": start, "num": 100, "location": "London",
+                                      "sort_by": "timestamp"}, timeout=TIMEOUT)
+        r.raise_for_status()
+        positions = r.json().get("positions", [])
+        for p in positions:
+            locs = [p.get("location", "")] + list(p.get("locations") or [])
+            loc = next((l for l in locs if is_london(l)), None)
+            if loc and is_graduate_role(p.get("name", "")):
+                created = p.get("t_create")
+                posted = datetime.fromtimestamp(created, tz=timezone.utc).date().isoformat() if created else None
+                out.append(_job("eightfold", sub, employer, p["id"], p["name"], loc,
+                                p.get("canonicalPositionUrl"), posted, clean(p.get("job_description", ""))))
+        if len(positions) < 100:
+            break
+        start += 100
     return out
 
 
@@ -270,6 +422,8 @@ FETCHERS = {
     "smartrecruiters": fetch_smartrecruiters,
     "workable": fetch_workable,
     "workday": fetch_workday,
+    "oracle": fetch_oracle,
+    "eightfold": fetch_eightfold,
 }
 
 
